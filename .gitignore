@@ -1,0 +1,10 @@
+# Artifacts générés
+workspace.dsl
+build/
+diagrams/
+
+# Sources de données
+*.xlsx
+*.dsl
+# ou plus précisément :
+flows_applications.xlsx
