@@ -2,6 +2,7 @@
 workspace.dsl
 build/
 diagrams/
+.venvdiag
 
 # Sources de données
 *.xlsx
