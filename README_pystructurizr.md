@@ -12,7 +12,7 @@ Génère un fichier **Structurizr DSL** à partir d’un inventaire Excel (*Appl
 Python ≥ 3.9 :
 
 ```bash
-python -m venv .venv
+python3 -m venv .venvdiag
 source .venv/bin/activate   # Windows : .venv\Scripts\activate
 pip install pystructurizr pandas openpyxl
 ```
@@ -26,7 +26,7 @@ pip install git+https://github.com/nielsvanspauwen/pystructurizr.git
 ## 2. Lancer la génération
 
 ```bash
-python generate_pystructurizr.py flows_applications.xlsx \
+python3 generate_pystructurizr.py flows_applications.xlsx \
        --views system,container \
        --output diagrams
 ```

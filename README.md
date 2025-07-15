@@ -14,20 +14,35 @@ Génère un *diagram‑as‑code* Structurizr à partir d'un inventaire Excel (*
 ## 2. Installation
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows : .venv\Scripts\activate
+python3 -m venv .venvdiag
+source .venvdiag/bin/activate   # Windows : .venv\Scripts\activate
 pip install pandas openpyxl structurizr-model structurizr-view structurizr-api
+pip install structurizr-python pandas openpyxl
+
 ```
 
 ## 3. Exécution
 
 ```bash
-python generate_diagram.py flows_applications.xlsx \
+python3 generate_diagram.py flows_applications.xlsx \
     --views system,container \
     --filter-protocol grpc,http \
     --hide-tags Keep \
     --output diagrams
+
+python3 generate_pystructurizr.py flows_applications.xlsx \
+    --views system,container \
+    --output diagrams --filter-tag SIRH,
+
+python3 generate_pystructurizr_id_v_3.py flows_applications.xlsx \ 
+    --views system,container \
+    --output diagrams
+
+
+    python generate_pystructurizr_id_v4.py flows.xlsx --filter-tag beta,critical
+
 ```
+
 
 Le dossier *diagrams/* contiendra `workspace.dsl` et `workspace.json`.
 
@@ -44,8 +59,11 @@ Relance le script : le workspace sera poussé automatiquement.
 ## 5. Visualisation locale
 
 ```bash
-docker run --rm -it -p 8080:8080 -v $(pwd)/diagrams:/usr/local/structurizr structurizr/lite
-# Ouvre http://localhost:8080 puis charge workspace.dsl
+
+docker run --rm -it -p 8080:8080 \
+  -v $(pwd)/diagrams:/usr/local/structurizr \
+  structurizr/lite
+
 ```
 
 ## 6. Aide
