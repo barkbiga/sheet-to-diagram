@@ -32,6 +32,7 @@ Dépendances : `pip install git+https://github.com/nielsvanspauwen/pystructuriz
 import argparse
 import logging
 import sys
+import re
 from pathlib import Path
 from typing import Tuple, Set
 
@@ -42,7 +43,7 @@ REQUIRED_APP = {
     "ID", "Name", "Application", "Component", "ParentAppID", "Status"
 }
 REQUIRED_FLOW = {
-    "ID", "Name", "Outbound", "Inbound", "Objet", "Protocol", "Format", "Tags"
+    "ID", "Name", "Outbound", "Inbound", "Objet", "Protocol", "Format", "Tags", "BusinessProcess"
 }
 
 # ------------------------------------------------ CLI
@@ -52,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("file", type=Path, help="flows_applications.xlsx")
     p.add_argument("--output", type=Path, default=Path("build"), help="Output directory")
     p.add_argument("--views", default="system,container", help="Views to generate (comma‑sep)")
-    p.add_argument("--filter-tag", default="", help="Filter flows by tag list (comma‑sep)")
+    p.add_argument("--filter-process", default="", help="Filter flows by business process list (comma‑sep)")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args()
 
@@ -101,11 +102,15 @@ def parse_tag_cell(cell: str) -> Set[str]:
     # Split by comma / semicolon / space & lowercase
     return {t.strip().lower() for t in re.split(r"[;,\s]+", cell) if t.strip()}
 
-import re
+
+
+def split_multi(text: str) -> Set[str]:
+    return {t for t in re.split(r"[;,\s]+", (text or "").lower()) if t}
+
 
 # ------------------------------------------------ Workspace builder
 
-def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, tag_filter: Set[str]) -> Workspace:
+def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, filter_procs: Set[str]) -> Workspace:
     ws = Workspace()
     model = ws.Model(name="model")
 
@@ -121,10 +126,7 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, ta
     # Systems & Containers -------------------------------------------------
     for _, row in apps[apps["Application"] == "#"].iterrows():
         sys_el = model.SoftwareSystem(row["Name"], row.get("Description", ""))
-        sys_el.tags.append("ApplicationSystem")
-        col = colour_map.get(row["Status"] or "keep")
-        if col:
-            sys_el.color = col
+        sys_el.tags.extend(["ApplicationContainer", f"status:{row['Status'] or 'keep'}"])
         elem_by_id[row["ID"]] = sys_el
         systems_by_id[row["ID"]] = sys_el
 
@@ -134,21 +136,14 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, ta
             logging.warning("Skip container %s: parent %s missing", row["ID"], row["ParentAppID"])
             continue
         cont = parent.Container(row["Name"], row.get("Description", ""), technology="")
-        cont.tags.append("ApplicationContainer")
-        col = colour_map.get(row["Status"] or "keep")
-        if col:
-            cont.color = col
+        cont.tags.extend(["ApplicationContainer", f"status:{row['Status'] or 'keep'}"])
         elem_by_id[row["ID"]] = cont
 
     # Relationships with dedup & tag‑filter --------------------------------
     seen = set()
     for _, f in flows.iterrows():
+        print("Business list →", f["BusinessProcess"])
         # Filter by tag if requested
-        if tag_filter:
-            flow_tags = parse_tag_cell(f["Tags"])
-            if not (flow_tags & tag_filter):
-                continue
-
         src, dst = elem_by_id.get(f["Outbound"]), elem_by_id.get(f["Inbound"])
         if not src or not dst:
             continue
@@ -159,11 +154,20 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, ta
 
         label = f"{f['Name']} / {f['Objet']} ({f['Format']})" if f["Name"] else f"{f['Objet']} ({f['Format']})"
         src.uses(dst, label, f["Protocol"])
+        
+        
+        for proc in split_multi(f["BusinessProcess"]):
+            tag = f"proc:{proc}"
+            print("Business →", tag)
+            if tag not in src.tags:
+                src.tags.append(tag)
+            if tag not in dst.tags:
+                dst.tags.append(tag)        
 
     # Views ---------------------------------------------------------------
     vset = {v.strip().lower() for v in views_spec.split(',') if v.strip()}
     if "system" in vset:
-        ws.SystemLandscapeView("SystemLandscape", "All systems (filtered)")
+        ws.SystemLandscapeView("SystemLandscape", "All systems")
     if "container" in vset:
         for sys_el in systems_by_id.values():
             if sys_el.elements:
@@ -173,7 +177,11 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, ta
     ws.Styles(
         {"tag": "ApplicationSystem", "shape": "RoundedBox", "background": "#1168bd", "color": "#ffffff"},
         {"tag": "ApplicationContainer", "shape": "Box", "background": "#438dd5", "color": "#ffffff"},
+        {"tag": "status:add", "shape": "Box", "background": "#28a745", "color": "#ffffff"},
+        {"tag": "status:change", "shape": "Box", "background": "#6f42c1", "color": "#ffffff"},
+        {"tag": "status:remove", "shape": "Box", "background": "#d9534f", "color": "#ffffff"},
     )
+
     return ws
 
 # ------------------------------------------------ main
@@ -185,9 +193,9 @@ def main():
     apps, flows = load_excel(args.file)
     validate(apps, flows)
 
-    tag_filter = {t.strip().lower() for t in args.filter_tag.split(',') if t.strip()}
+    filter_procs = {p.strip().lower() for p in args.filter_process.split(',') if p.strip()}
 
-    ws = build_workspace(apps, flows, args.views, tag_filter)
+    ws = build_workspace(apps, flows, args.views, filter_procs)
 
     args.output.mkdir(parents=True, exist_ok=True)
     out = args.output / "workspace.dsl"

@@ -16,8 +16,7 @@ Génère un *diagram‑as‑code* Structurizr à partir d'un inventaire Excel (*
 ```bash
 python3 -m venv .venvdiag
 source .venvdiag/bin/activate   # Windows : .venv\Scripts\activate
-pip install pandas openpyxl structurizr-model structurizr-view structurizr-api
-pip install structurizr-python pandas openpyxl
+pip install pystructurizr pandas openpyxl
 
 ```
 
@@ -32,11 +31,9 @@ python3 generate_diagram.py flows_applications.xlsx \
 
 python3 generate_pystructurizr.py flows_applications.xlsx \
     --views system,container \
-    --output diagrams --filter-tag SIRH,
+    --output diagrams --filter-process onboarding,
 
-python3 generate_pystructurizr_id_v_3.py flows_applications.xlsx \ 
-    --views system,container \
-    --output diagrams
+
 
 
     python generate_pystructurizr_id_v4.py flows.xlsx --filter-tag beta,critical
