@@ -1,74 +1,24 @@
+# 🧩 sheet-to-diagram (Dockerized)
 
-# Diagram Builder — Structurizr
+Ce projet exécute un script Python utilisant `pandas` dans un conteneur Docker, afin d’éviter les problèmes d’antivirus (ex. : McAfee) et garantir un environnement cohérent.
 
-🗓️ *Généré le 2025-07-14*
+---
 
-Génère un *diagram‑as‑code* Structurizr à partir d'un inventaire Excel (*Applications* & *Flows*).
-
-## 1. Prérequis
-
-- Python ≥ 3.9  
-- `pip`  
-- (optionnel) Docker pour Structurizr‑Lite
-
-## 2. Installation
-
-```bash
-python3 -m venv .venvdiag
-source .venvdiag/bin/activate   # Windows : .venv\Scripts\activate
-pip install pystructurizr pandas openpyxl
-
-```
-
-## 3. Exécution
-
-```bash
-python3 generate_diagram.py flows_applications.xlsx \
-    --views system,container \
-    --filter-protocol grpc,http \
-    --hide-tags Keep \
-    --output diagrams
-
-python3 generate_pystructurizr.py flows_applications.xlsx \
-    --views system,container \
-    --output diagrams --filter-process onboarding,
+## 📁 Structure attendue
 
 
 
-
-    python generate_pystructurizr_id_v4.py flows.xlsx --filter-tag beta,critical
-
-```
+docker build -t sheet-to-diagram .
 
 
-Le dossier *diagrams/* contiendra `workspace.dsl` et `workspace.json`.
+# Windows
+docker run --rm -v %cd%:/app sheet-to-diagram
 
-## 4. Structurizr Cloud (facultatif)
-
-```bash
-export STRUCTURIZR_API_KEY="yourKey"
-export STRUCTURIZR_API_SECRET="yourSecret"
-export STRUCTURIZR_WORKSPACE_ID="12345"
-```
-
-Relance le script : le workspace sera poussé automatiquement.
-
-## 5. Visualisation locale
-
-```bash
-
-docker run --rm -it -p 8080:8080 \
-  -v $(pwd)/diagrams:/usr/local/structurizr \
-  structurizr/lite
-
-```
-
-## 6. Aide
-
-```bash
-python generate_diagram.py --help
-```
+# Linux / WSL
+docker run --rm -v $(pwd):/app sheet-to-diagram
 
 
+# Exemple : monter un dossier contenant des fichiers Excel
+docker run --rm -v %cd%:/app -v C:\chemin\vers\excels:/data sheet-to-diagram
 
-
+docker rmi sheet-to-diagram
