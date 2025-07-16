@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
-"""Generate Structurizr DSL via custom DSL — IDs in Flows, names in diagram  **v8**.
-
-### Changements majeurs v8
-1. **Vues par processus = 1 ContainerView par système concerné**
-   - Pour chaque processus `P` et chaque *SoftwareSystem* `S` ayant au moins un conteneur tagué `proc:P`, on crée la vue :
-     ```
-     container proc_<P>_<S> "Business process — <P name> / <S>"
-     ```
-   - Elle inclut `S` et uniquement ses conteneurs portant le tag `proc:P` ; les autres sont exclus.
-   - Ainsi, les conteneurs apparaissent bien (contrairement à SystemLandscapeView, limité aux systèmes).
-2. **Propagation automatique** du tag `proc:*` du conteneur vers son système parent (afin que le système figure aussi dans la vue).
-3. **Suppression** de l’ancienne boucle _SystemLandscapeView proc_* (désormais inutile).
-4. **Logs DEBUG** indiquant les vues créées et les éléments inclus/exclus.
-
----
-Usage :
-```bash
-python generate_pystructurizr_id_v8.py flows_applications.xlsx \
-       --output build --log-level DEBUG
-```
+"""Generate Structurizr DSL from Excel — **v10 (Group‑centric)**
+---------------------------------------------------------------
+* Les **SoftwareSystems sont remplacés par des Group** dans le `model`.
+* Une **CustomView** par processus affiche les conteneurs regroupés par leur
+  groupe (ancien système).
+* Pas de vues globales System/Container (plus de système).
+* Styles adaptés (tag `ApplicationGroup`).
 """
 
 import argparse
@@ -30,114 +17,127 @@ from typing import Tuple, Set, Dict
 
 import pandas as pd
 from pystructurizr.dsl import View, Dumper, Workspace  # type: ignore
+from types import SimpleNamespace
 
 # -------------------------------------------------------------------
-# Monkey-patch View.dump to embed the *key* (self.name) after element
+# Patch View.dump – gère group_map lorsqu’elle est fournie
 # -------------------------------------------------------------------
 
 def _patched_view_dump(self: View, dumper: Dumper) -> None:  # noqa: D401
-    elem_part = self.element.instname if self.element else ""
     key_part = f" {self.name}" if self.name else ""
-    dumper.add(f"{self.viewkind.value} {elem_part}{key_part} {{")
+    dumper.add(f"{self.viewkind.value}{key_part} {{")
     dumper.indent()
     if self.description:
         dumper.add(f'description "{self.description}"')
-    dumper.add('include *')
-    for include in self.includes:
-        dumper.add(f'include {include.instname}')
-    for exclude in self.excludes:
-        dumper.add(f'exclude {exclude.instname}')
-    dumper.add('autoLayout')
+
+    if hasattr(self, "group_map"):
+        for grp_name, cont_list in self.group_map.items():
+            dumper.add(f'group "{grp_name}" {{')
+            dumper.indent()
+            for c in cont_list:
+                dumper.add(f'include {c.instname}')
+            dumper.outdent()
+            dumper.add('}')
+    else:
+        for inc in dict.fromkeys(self.includes):
+            dumper.add(f'include {inc.instname}')
+
+    dumper.add('autoLayout lr')
     dumper.outdent()
     dumper.add('}')
 
 View.dump = _patched_view_dump  # type: ignore
 
 # -------------------------------------------------------------------
+# Add CustomView capability
+# -------------------------------------------------------------------
+_custom_kind = SimpleNamespace(value="custom")
+
+def _custom_view(self, key: str, description: str):  # noqa: D401
+    v = View(_custom_kind, None, key, description)
+    self.views.append(v)
+    return v
+
+setattr(Workspace, "CustomView", _custom_view)
+
+# -------------------------------------------------------------------
 # Constants
 # -------------------------------------------------------------------
-
-
-
-REQUIRED_APP = {
-    "ID", "Name", "Application", "Component", "ParentAppID", "Status"
-}
+REQUIRED_APP = {"ID", "Name", "Application", "Component", "ParentAppID", "Status"}
 REQUIRED_FLOW = {
     "ID", "Name", "Outbound", "Inbound", "Objet", "Protocol", "Format", "Tags", "BusinessProcess"
 }
 
-# ------------------------------------------------ CLI
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build Structurizr workspace from Excel (IDs mode)")
-    p.add_argument("file", type=Path, help="flows_applications.xlsx")
-    p.add_argument("--output", type=Path, default=Path("build"), help="Output directory")
-    p.add_argument("--views", default="system,container", help="Standard views to generate (comma‑sep)")
-    p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
-    return p.parse_args()
+def split_multi(text: str) -> Set[str]:
+    return {t for t in re.split(r"[;,\s]+", (text or "").lower()) if t}
 
-# ------------------------------------------------ Excel loading
+def camel(s: str) -> str:
+    return "".join(w.capitalize() for w in re.split(r"[^0-9a-zA-Z]", s) if w)
+
+# -------------------------------------------------------------------
+# Load & validate Excel
+# -------------------------------------------------------------------
 
 def load_excel(path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     kw = dict(dtype=str, keep_default_na=False, engine="openpyxl")
     apps = pd.read_excel(path, sheet_name="Applications", **kw)
     flows = pd.read_excel(path, sheet_name="Flows", **kw)
     try:
-        processes = pd.read_excel(path, sheet_name="BusinessProcesses", **kw)
+        procs = pd.read_excel(path, sheet_name="BusinessProcesses", **kw)
     except ValueError:
-        processes = pd.DataFrame(columns=["ID", "Name"])
+        procs = pd.DataFrame(columns=["ID", "Name"])
 
+    # strip
     for col in ("ID", "ParentAppID"):
         apps[col] = apps[col].str.strip()
     for col in ("Outbound", "Inbound", "Tags", "BusinessProcess"):
         flows[col] = flows[col].str.strip()
-
     apps["Status"] = apps["Status"].str.strip().str.lower()
-    return apps, flows, processes
+    return apps, flows, procs
 
-# ------------------------------------------------ Validation
 
 def validate(apps: pd.DataFrame, flows: pd.DataFrame):
-    if m := REQUIRED_APP - set(apps.columns):
-        raise ValueError(f"Applications missing: {', '.join(m)}")
-    if m := REQUIRED_FLOW - set(flows.columns):
-        raise ValueError(f"Flows missing: {', '.join(m)}")
+    if diff := REQUIRED_APP - set(apps.columns):
+        raise ValueError(f"Applications missing columns: {', '.join(diff)}")
+    if diff := REQUIRED_FLOW - set(flows.columns):
+        raise ValueError(f"Flows missing columns: {', '.join(diff)}")
 
-    idset = set(apps["ID"])
-    bad_parent = apps[(apps["Component"] == "#") & (~apps["ParentAppID"].isin(idset))]
+    ids = set(apps["ID"])
+    bad_parent = apps[(apps["Component"] == "#") & (~apps["ParentAppID"].isin(ids))]
     if not bad_parent.empty:
         raise ValueError("Invalid ParentAppID rows: " + ", ".join(map(str, bad_parent.index)))
 
     for col in ("Outbound", "Inbound"):
-        miss = flows[~flows[col].isin(idset)]
-        if not miss.empty:
-            raise ValueError(f"{col} unknown IDs rows: {', '.join(map(str, miss.index))}")
+        bad = flows[~flows[col].isin(ids)]
+        if not bad.empty:
+            raise ValueError(f"{col} unknown IDs rows: {', '.join(map(str, bad.index))}")
 
-# ------------------------------------------------ Helpers
+# -------------------------------------------------------------------
+# Workspace builder
+# -------------------------------------------------------------------
 
-def split_multi(text: str) -> Set[str]:
-    return {t for t in re.split(r"[;,\s]+", (text or "").lower()) if t}
-
-# ------------------------------------------------ Workspace builder
-
-def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, processes: pd.DataFrame, views_spec: str) -> Workspace:
+def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, procs: pd.DataFrame) -> Workspace:
     ws = Workspace()
     model = ws.Model(name="model")
-   
+
     elem_by_id: Dict[str, any] = {}
-    systems_by_id: Dict[str, any] = {}
+    groups_by_id: Dict[str, any] = {}
     container_parent: Dict[any, any] = {}
 
-    # --- Elements : SoftwareSystems
+    # Groups
     for _, row in apps[apps["Application"] == "#"].iterrows():
-        sys_el = model.SoftwareSystem(row["Name"], row.get("Description", ""))
-        sys_el.tags.extend(["ApplicationSystem", f"status:{row['Status'] or 'keep'}"])
-        elem_by_id[row["ID"]] = sys_el
-        systems_by_id[row["ID"]] = sys_el
+        g = model.Group(row["Name"])
+        g.tags.extend(["ApplicationGroup", f"status:{row['Status'] or 'keep'}"])
+        elem_by_id[row["ID"]] = g
+        groups_by_id[row["ID"]] = g
 
-    # --- Elements : Containers
+    # Containers
     for _, row in apps[apps["Component"] == "#"].iterrows():
-        parent = systems_by_id.get(row["ParentAppID"])
+        parent = groups_by_id.get(row["ParentAppID"])
         if not parent:
             logging.warning("Skip container %s: parent %s missing", row["ID"], row["ParentAppID"])
             continue
@@ -146,114 +146,85 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, processes: pd.DataF
         elem_by_id[row["ID"]] = cont
         container_parent[cont] = parent
 
-    # --- Relationships & tagging proc:*
+    # Relationships + tag proc:* on containers/groups
     seen = set()
     for _, f in flows.iterrows():
         src, dst = elem_by_id.get(f["Outbound"]), elem_by_id.get(f["Inbound"])
         if not src or not dst:
             continue
-        key = (f["Outbound"], f["Inbound"], f["Objet"], f["Protocol"], f["Format"])
-        if key in seen:
+        k = (f["Outbound"], f["Inbound"], f["Objet"], f["Protocol"], f["Format"])
+        if k in seen:
             continue
-        seen.add(key)
-
-        label = f"{f['Name']} / {f['Objet']} ({f['Format']})" if f["Name"] else f"{f['Objet']} ({f['Format']})"
-        src.uses(dst, label, f["Protocol"])
-
+        seen.add(k)
+        desc = f["Name"] or f["Objet"]
+        src.uses(dst, desc, f["Protocol"])
         for proc in split_multi(f["BusinessProcess"]):
             tag = f"proc:{proc}"
             for el in (src, dst):
                 if tag not in el.tags:
                     el.tags.append(tag)
 
-    # --- Propagate proc:* tags from containers to their parent systems
-    for cont, parent in container_parent.items():
+    # Propagate tags to groups
+    for cont, grp in container_parent.items():
         for tag in cont.tags:
-            if tag.startswith("proc:") and tag not in parent.tags:
-                parent.tags.append(tag)
+            if tag.startswith("proc:") and tag not in grp.tags:
+                grp.tags.append(tag)
 
-    # --- Standard views (system/container global)
-    vset = {v.strip().lower() for v in views_spec.split(',') if v.strip()}
-    if "system" in vset:
-        ws.SystemLandscapeView("SystemLandscape", "All systems")
-    if "container" in vset:
-        for sys_el in systems_by_id.values():
-            if sys_el.elements:
-                ws.ContainerView(sys_el, f"{sys_el.name}_Container", f"Containers for {sys_el.name}")
-
-    # --- Business‑process ContainerViews (par système)
-    for _, prow in processes.iterrows():
+    # CustomView per process
+    for _, prow in procs.iterrows():
         pid = prow["ID"].strip()
         if not pid:
             continue
         pname = prow["Name"].strip() or pid
         tag = f"proc:{pid.lower()}"
+        view = ws.CustomView(f"Proc{camel(pname)}", f"{pname} (process view)")
 
-        for sys_id, sys_el in systems_by_id.items():
-            # Conteneurs concernés dans ce système
-            conts = [c for c in sys_el.elements if tag in c.tags]
-            if not conts:
-                continue  # Ce système n'est pas concerné par ce processus
+        group_map: Dict[str, list] = {}
+        for grp in groups_by_id.values():
+            conts = [c for c in grp.elements if tag in c.tags]
+            if conts:
+                group_map[grp.name] = conts
+        view.group_map = group_map  # type: ignore
+        logging.debug("Process %s → %d groups", pid, len(group_map))
 
-         
-            def camel(s: str) -> str:
-                return ''.join(word.capitalize() for word in re.split(r"[^0-9a-zA-Z]", s) if word)
-
-            safe_pname = camel(pname)
-            safe_sysname = camel(sys_el.name)
-            view_key = f"Proc{safe_pname}{safe_sysname}"
-            view_title = f"{pname} – {sys_el.name} (process view)"
-            view = ws.ContainerView(sys_el, view_key, view_title)
-
-            # Inclure uniquement ce qu'il faut
-            view.include(sys_el)
-            for c in conts:
-                view.include(c)
-
-            # Exclure les autres conteneurs du système
-            for c in sys_el.elements:
-                if c not in conts:
-                    view.exclude(c)
-
-            logging.debug("[view %s] system=%s containers=%s", view_key, sys_el.name, [c.name for c in conts])
-
-    # --- Styles
+    # Styles
     ws.Styles(
-        {"tag": "ApplicationSystem", "shape": "RoundedBox", "background": "#1168bd", "color": "#ffffff"},
-        {"tag": "ApplicationContainer", "shape": "Box", "background": "#438dd5", "color": "#ffffff"},
-        {"tag": "status:add", "shape": "Box", "background": "#28a745", "color": "#ffffff"},
-        {"tag": "status:change", "shape": "Box", "background": "#6f42c1", "color": "#ffffff"},
-        {"tag": "status:remove", "shape": "Box", "background": "#d9534f", "color": "#ffffff"},
+        {"tag": "ApplicationGroup", "background": "#1168bd", "color": "#ffffff", "shape": "RoundedBox"},
+        {"tag": "ApplicationContainer", "background": "#438dd5", "color": "#ffffff"},
+        {"tag": "status:add", "background": "#28a745", "color": "#ffffff"},
+        {"tag": "status:change", "background": "#6f42c1", "color": "#ffffff"},
+        {"tag": "status:remove", "background": "#d9534f", "color": "#ffffff"},
     )
 
     return ws
 
-# ------------------------------------------------ main
+# -------------------------------------------------------------------
+# CLI + main
+# -------------------------------------------------------------------
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("excel")
+    parser.add_argument("--output", default="build")
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+
     logging.basicConfig(level=args.log_level)
-    apps, flows, processes = load_excel(args.file)
+    apps, flows, procs = load_excel(Path(args.excel))
     validate(apps, flows)
+    ws = build_workspace(apps, flows, procs)
 
-    ws = build_workspace(apps, flows, processes, args.views)
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "workspace.dsl").write_text(ws.dump(), encoding="utf-8")
+    logging.info("DSL saved → %s", out / "workspace.dsl")
 
-    args.output.mkdir(parents=True, exist_ok=True)
-
-        # Ensure output dir
-    args.output.mkdir(parents=True, exist_ok=True)
-    dsl_path = args.output / "workspace.dsl"
-    dsl_path.write_text(ws.dump(), encoding="utf-8")
-    logging.info("DSL saved → %s", dsl_path)
-
-    if args.log_level == "DEBUG":
-        print("==== DSL content ====")
+    if args.log_level.upper() == "DEBUG":
         print(ws.dump())
-
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
-        logging.error(exc)
+    except Exception as e:
+        logging.error(e)
         sys.exit(1)

@@ -29,6 +29,8 @@ pip install git+https://github.com/nielsvanspauwen/pystructurizr.git
 python3 generate_pystructurizr.py flows_applications.xlsx \
        --views system,container \
        --output diagrams
+python3 cli.py flows_applications.xlsx \
+    --output diagrams --log-level DEBUG
 ```
 
 **Résultat :** `diagrams/workspace.dsl`
@@ -67,3 +69,4 @@ structurizr-cli push -workspace diagrams/workspace.dsl \
 ---
 
 _Généré le 2025-07-14_
+
