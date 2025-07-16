@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
-"""Generate Structurizr DSL via pystructurizr — IDs in Flows, names in diagram  **v5**.
+"""Generate Structurizr DSL via custom DSL — IDs in Flows, names in diagram  **v8**.
 
-### Nouveautés v5
-1. **Couleurs élémentaires pilotées par `Applications.Status`**  
-   | Status   | Couleur | Code |
-   |----------|---------|------|
-   | Keep/—   | palette par défaut Structurizr |
-   | Change   | violet `#6f42c1` |
-   | Add      | vert `#28a745` |
-   | Remove   | rouge `#d9534f` |
-
-2. **Filtrage par tag des flux**  
-   *Paramètre CLI :* `--filter-tag beta,critical`  
-   Seuls les flux dont la colonne **Tags** contient l’un des tags spécifiés (séparateur virgule ou espace) sont conservés ; les autres relations ne sont pas générées.
-
-3. Colonnes obligatoires :  
-   *Applications* : ajoute `Status`  
-   *Flows* : ajoute `Tags` (multivalué).
+### Changements majeurs v8
+1. **Vues par processus = 1 ContainerView par système concerné**
+   - Pour chaque processus `P` et chaque *SoftwareSystem* `S` ayant au moins un conteneur tagué `proc:P`, on crée la vue :
+     ```
+     container proc_<P>_<S> "Business process — <P name> / <S>"
+     ```
+   - Elle inclut `S` et uniquement ses conteneurs portant le tag `proc:P` ; les autres sont exclus.
+   - Ainsi, les conteneurs apparaissent bien (contrairement à SystemLandscapeView, limité aux systèmes).
+2. **Propagation automatique** du tag `proc:*` du conteneur vers son système parent (afin que le système figure aussi dans la vue).
+3. **Suppression** de l’ancienne boucle _SystemLandscapeView proc_* (désormais inutile).
+4. **Logs DEBUG** indiquant les vues créées et les éléments inclus/exclus.
 
 ---
 Usage :
 ```bash
-python generate_pystructurizr_id_v5.py flows_applications.xlsx \
-       --filter-tag beta,critical \
-       --output diagrams
+python generate_pystructurizr_id_v8.py flows_applications.xlsx \
+       --output build --log-level DEBUG
 ```
-
-Dépendances : `pip install git+https://github.com/nielsvanspauwen/pystructurizr.git pandas openpyxl`
 """
 
 import argparse
@@ -34,10 +26,38 @@ import logging
 import sys
 import re
 from pathlib import Path
-from typing import Tuple, Set
+from typing import Tuple, Set, Dict
 
 import pandas as pd
-from pystructurizr.dsl import Workspace
+from pystructurizr.dsl import View, Dumper, Workspace  # type: ignore
+
+# -------------------------------------------------------------------
+# Monkey-patch View.dump to embed the *key* (self.name) after element
+# -------------------------------------------------------------------
+
+def _patched_view_dump(self: View, dumper: Dumper) -> None:  # noqa: D401
+    elem_part = self.element.instname if self.element else ""
+    key_part = f" {self.name}" if self.name else ""
+    dumper.add(f"{self.viewkind.value} {elem_part}{key_part} {{")
+    dumper.indent()
+    if self.description:
+        dumper.add(f'description "{self.description}"')
+    dumper.add('include *')
+    for include in self.includes:
+        dumper.add(f'include {include.instname}')
+    for exclude in self.excludes:
+        dumper.add(f'exclude {exclude.instname}')
+    dumper.add('autoLayout')
+    dumper.outdent()
+    dumper.add('}')
+
+View.dump = _patched_view_dump  # type: ignore
+
+# -------------------------------------------------------------------
+# Constants
+# -------------------------------------------------------------------
+
+
 
 REQUIRED_APP = {
     "ID", "Name", "Application", "Component", "ParentAppID", "Status"
@@ -52,26 +72,28 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Build Structurizr workspace from Excel (IDs mode)")
     p.add_argument("file", type=Path, help="flows_applications.xlsx")
     p.add_argument("--output", type=Path, default=Path("build"), help="Output directory")
-    p.add_argument("--views", default="system,container", help="Views to generate (comma‑sep)")
-    p.add_argument("--filter-process", default="", help="Filter flows by business process list (comma‑sep)")
+    p.add_argument("--views", default="system,container", help="Standard views to generate (comma‑sep)")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args()
 
 # ------------------------------------------------ Excel loading
 
-def load_excel(path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_excel(path: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     kw = dict(dtype=str, keep_default_na=False, engine="openpyxl")
     apps = pd.read_excel(path, sheet_name="Applications", **kw)
     flows = pd.read_excel(path, sheet_name="Flows", **kw)
+    try:
+        processes = pd.read_excel(path, sheet_name="BusinessProcesses", **kw)
+    except ValueError:
+        processes = pd.DataFrame(columns=["ID", "Name"])
 
-    # Trim
     for col in ("ID", "ParentAppID"):
         apps[col] = apps[col].str.strip()
-    for col in ("Outbound", "Inbound", "Tags"):
+    for col in ("Outbound", "Inbound", "Tags", "BusinessProcess"):
         flows[col] = flows[col].str.strip()
 
     apps["Status"] = apps["Status"].str.strip().str.lower()
-    return apps, flows
+    return apps, flows, processes
 
 # ------------------------------------------------ Validation
 
@@ -91,45 +113,29 @@ def validate(apps: pd.DataFrame, flows: pd.DataFrame):
         if not miss.empty:
             raise ValueError(f"{col} unknown IDs rows: {', '.join(map(str, miss.index))}")
 
-    for col in ("Protocol", "Objet", "Format"):
-        empty = flows[flows[col] == ""]
-        if not empty.empty:
-            raise ValueError(f"Column {col} empty rows: {', '.join(map(str, empty.index))}")
-
-# ------------------------------------------------ Helper
-
-def parse_tag_cell(cell: str) -> Set[str]:
-    # Split by comma / semicolon / space & lowercase
-    return {t.strip().lower() for t in re.split(r"[;,\s]+", cell) if t.strip()}
-
-
+# ------------------------------------------------ Helpers
 
 def split_multi(text: str) -> Set[str]:
     return {t for t in re.split(r"[;,\s]+", (text or "").lower()) if t}
 
-
 # ------------------------------------------------ Workspace builder
 
-def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, filter_procs: Set[str]) -> Workspace:
+def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, processes: pd.DataFrame, views_spec: str) -> Workspace:
     ws = Workspace()
     model = ws.Model(name="model")
+   
+    elem_by_id: Dict[str, any] = {}
+    systems_by_id: Dict[str, any] = {}
+    container_parent: Dict[any, any] = {}
 
-    elem_by_id, systems_by_id = {}, {}
-
-    colour_map = {
-        "add": "#28a745",
-        "change": "#6f42c1",  # violet
-        "remove": "#d9534f",
-        "keep": None,
-    }
-
-    # Systems & Containers -------------------------------------------------
+    # --- Elements : SoftwareSystems
     for _, row in apps[apps["Application"] == "#"].iterrows():
         sys_el = model.SoftwareSystem(row["Name"], row.get("Description", ""))
-        sys_el.tags.extend(["ApplicationContainer", f"status:{row['Status'] or 'keep'}"])
+        sys_el.tags.extend(["ApplicationSystem", f"status:{row['Status'] or 'keep'}"])
         elem_by_id[row["ID"]] = sys_el
         systems_by_id[row["ID"]] = sys_el
 
+    # --- Elements : Containers
     for _, row in apps[apps["Component"] == "#"].iterrows():
         parent = systems_by_id.get(row["ParentAppID"])
         if not parent:
@@ -138,33 +144,35 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, fi
         cont = parent.Container(row["Name"], row.get("Description", ""), technology="")
         cont.tags.extend(["ApplicationContainer", f"status:{row['Status'] or 'keep'}"])
         elem_by_id[row["ID"]] = cont
+        container_parent[cont] = parent
 
-    # Relationships with dedup & tag‑filter --------------------------------
+    # --- Relationships & tagging proc:*
     seen = set()
     for _, f in flows.iterrows():
-        print("Business list →", f["BusinessProcess"])
-        # Filter by tag if requested
         src, dst = elem_by_id.get(f["Outbound"]), elem_by_id.get(f["Inbound"])
         if not src or not dst:
             continue
-        dedup = (f["Outbound"], f["Inbound"], f["Objet"], f["Protocol"], f["Format"])
-        if dedup in seen:
+        key = (f["Outbound"], f["Inbound"], f["Objet"], f["Protocol"], f["Format"])
+        if key in seen:
             continue
-        seen.add(dedup)
+        seen.add(key)
 
         label = f"{f['Name']} / {f['Objet']} ({f['Format']})" if f["Name"] else f"{f['Objet']} ({f['Format']})"
         src.uses(dst, label, f["Protocol"])
-        
-        
+
         for proc in split_multi(f["BusinessProcess"]):
             tag = f"proc:{proc}"
-            print("Business →", tag)
-            if tag not in src.tags:
-                src.tags.append(tag)
-            if tag not in dst.tags:
-                dst.tags.append(tag)        
+            for el in (src, dst):
+                if tag not in el.tags:
+                    el.tags.append(tag)
 
-    # Views ---------------------------------------------------------------
+    # --- Propagate proc:* tags from containers to their parent systems
+    for cont, parent in container_parent.items():
+        for tag in cont.tags:
+            if tag.startswith("proc:") and tag not in parent.tags:
+                parent.tags.append(tag)
+
+    # --- Standard views (system/container global)
     vset = {v.strip().lower() for v in views_spec.split(',') if v.strip()}
     if "system" in vset:
         ws.SystemLandscapeView("SystemLandscape", "All systems")
@@ -173,7 +181,43 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, fi
             if sys_el.elements:
                 ws.ContainerView(sys_el, f"{sys_el.name}_Container", f"Containers for {sys_el.name}")
 
-    # Styles (elements seulement)
+    # --- Business‑process ContainerViews (par système)
+    for _, prow in processes.iterrows():
+        pid = prow["ID"].strip()
+        if not pid:
+            continue
+        pname = prow["Name"].strip() or pid
+        tag = f"proc:{pid.lower()}"
+
+        for sys_id, sys_el in systems_by_id.items():
+            # Conteneurs concernés dans ce système
+            conts = [c for c in sys_el.elements if tag in c.tags]
+            if not conts:
+                continue  # Ce système n'est pas concerné par ce processus
+
+         
+            def camel(s: str) -> str:
+                return ''.join(word.capitalize() for word in re.split(r"[^0-9a-zA-Z]", s) if word)
+
+            safe_pname = camel(pname)
+            safe_sysname = camel(sys_el.name)
+            view_key = f"Proc{safe_pname}{safe_sysname}"
+            view_title = f"{pname} – {sys_el.name} (process view)"
+            view = ws.ContainerView(sys_el, view_key, view_title)
+
+            # Inclure uniquement ce qu'il faut
+            view.include(sys_el)
+            for c in conts:
+                view.include(c)
+
+            # Exclure les autres conteneurs du système
+            for c in sys_el.elements:
+                if c not in conts:
+                    view.exclude(c)
+
+            logging.debug("[view %s] system=%s containers=%s", view_key, sys_el.name, [c.name for c in conts])
+
+    # --- Styles
     ws.Styles(
         {"tag": "ApplicationSystem", "shape": "RoundedBox", "background": "#1168bd", "color": "#ffffff"},
         {"tag": "ApplicationContainer", "shape": "Box", "background": "#438dd5", "color": "#ffffff"},
@@ -189,18 +233,23 @@ def build_workspace(apps: pd.DataFrame, flows: pd.DataFrame, views_spec: str, fi
 def main():
     args = parse_args()
     logging.basicConfig(level=args.log_level)
-
-    apps, flows = load_excel(args.file)
+    apps, flows, processes = load_excel(args.file)
     validate(apps, flows)
 
-    filter_procs = {p.strip().lower() for p in args.filter_process.split(',') if p.strip()}
-
-    ws = build_workspace(apps, flows, args.views, filter_procs)
+    ws = build_workspace(apps, flows, processes, args.views)
 
     args.output.mkdir(parents=True, exist_ok=True)
-    out = args.output / "workspace.dsl"
-    out.write_text(ws.dump(), encoding="utf-8")
-    print("DSL saved →", out)
+
+        # Ensure output dir
+    args.output.mkdir(parents=True, exist_ok=True)
+    dsl_path = args.output / "workspace.dsl"
+    dsl_path.write_text(ws.dump(), encoding="utf-8")
+    logging.info("DSL saved → %s", dsl_path)
+
+    if args.log_level == "DEBUG":
+        print("==== DSL content ====")
+        print(ws.dump())
+
 
 if __name__ == "__main__":
     try:
